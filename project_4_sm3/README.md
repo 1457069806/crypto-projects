@@ -1,318 +1,324 @@
-# SM3密码学项目实现文档
+# SM2签名算法漏洞验证与模拟实验
 
 ## 项目概述
+本项目旨在通过技术模拟，验证SM2椭圆曲线公钥密码算法的核心原理及潜在安全漏洞。主要包含三个核心步骤：
+1. **SM2算法核心实现**：实现密钥生成、签名、验签等基础功能
+2. **PoC验证**：验证"重复使用随机数k"导致的私钥泄露漏洞
+3. **虚构场景签名伪造**：基于漏洞原理，在纯虚构场景下模拟签名伪造（**注：所有数据与真实人物/系统无关**）
 
-本项目围绕国密SM3哈希算法展开，依次完成了从基础实现到高级应用的全流程开发，具体包括：SM3基础实现、性能优化、长度扩展攻击验证、基于RFC6962标准的Merkle树构建及存在性/不存在性证明。项目旨在深入理解SM3算法原理、密码学攻击原理及Merkle树在数据完整性验证中的应用。
+**伦理与法律声明**：本项目仅用于密码学技术研究，所有实验基于虚构数据，严禁用于任何非法用途。伪造真实实体的数字签名可能违反《网络安全法》《刑法》等法律法规，需承担相应法律责任。
 
 
-## 一、SM3哈希算法基础实现
+## 环境准备
+- **依赖库**：`gmssl`（提供SM3哈希算法）、`secrets`（加密安全随机数生成）
+- **运行环境**：Python 3.8+
+- **安装命令**：`pip install gmssl`
 
-### 1. 算法原理
 
-SM3是中国国家密码管理局发布的密码杂凑算法，用于生成256位（32字节）哈希值，其核心流程包括：
-- **消息填充**：将输入消息扩展为512比特的整数倍
-- **消息扩展**：将512比特消息块扩展为132个32比特字
-- **压缩函数**：基于初始向量（IV）和扩展后的消息字进行64轮迭代，生成哈希值
+## 一、SM2算法核心实现
 
-### 2. 核心步骤与数学定义
-
-#### （1）消息填充
-设消息长度为`l`（比特），填充规则：
-1. 附加1个比特`1`
-2. 附加`k`个比特`0`，使得`l + 1 + k ≡ 448 mod 512`
-3. 附加64比特的`l`（大端模式）
-
-数学表达：
-```
-填充后长度 = l + 1 + k + 64 = 512 × m （m为正整数）
-k = (448 - (l + 1) mod 512) mod 512
-```
-
-#### （2）消息扩展
-对于512比特消息块`B`，扩展为`W[0..67]`和`W'[0..63]`：
-- `W[0..15]`：将`B`按32比特字分割（大端模式）
-- `W[j]`（16≤j≤67）：
-  ```
-  W[j] = P1(W[j-16] ⊕ W[j-9] ⊕ RotL(W[j-3], 15)) ⊕ RotL(W[j-13], 7) ⊕ W[j-6]
-  ```
-- `W'[j] = W[j] ⊕ W[j+4]`（0≤j≤63）
-
-其中：
-- `RotL(x, n)`：循环左移n位，`RotL(x, n) = (x << n) ∨ (x >> (32-n))`
-- `P1(x) = x ⊕ RotL(x, 15) ⊕ RotL(x, 23)`（置换函数）
-
-#### （3）压缩函数
-初始向量`IV = [0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600, 0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E]`
-
-64轮迭代（j=0到63）：
-```
-SS1 = RotL((RotL(A, 12) + E + RotL(T_j, j)) mod 2^32, 7)
-SS2 = SS1 ⊕ RotL(A, 12)
-TT1 = (FF_j(A, B, C) + D + SS2 + W'[j]) mod 2^32
-TT2 = (GG_j(E, F, G) + H + SS1 + W[j]) mod 2^32
-D = C
-C = RotL(B, 9)
-B = A
-A = TT1
-H = G
-G = RotL(F, 19)
-F = E
-E = P0(TT2)
-```
-
-其中：
-- `T_j`：常量，`T_j=0x79CC4519`（0≤j≤15），`T_j=0x7A879D8A`（16≤j≤63）
-- `FF_j(x,y,z)`：布尔函数，`j≤15时=x⊕y⊕z；j>15时=(x∧y)∨(x∧z)∨(y∧z)`
-- `GG_j(x,y,z)`：布尔函数，`j≤15时=x⊕y⊕z；j>15时=(x∧y)∨(¬x∧z)`
-- `P0(x) = x ⊕ RotL(x, 9) ⊕ RotL(x, 17)`（置换函数）
-
-### 3. 基础实现代码结构
+### 1.1 椭圆曲线参数定义
+SM2采用256位素数域椭圆曲线，参数如下（符合国家标准）：
 ```python
-def sm3_hash(message):
-    # 1. 消息填充
-    padded = fill_message(message)
-    # 2. 初始化IV
-    V = IV.copy()
-    # 3. 分块处理
-    for i in range(0, len(padded), 64):
-        block = padded[i:i+64]
-        # 消息扩展
-        W, W_prime = message_extension(block)
-        # 压缩函数
-        V = compression_function(V, W, W_prime)
-    # 4. 生成哈希值
-    return ''.join(f'{word:08x}' for word in V)
+p = 0x8542D69E4C044F18E8B92435BF6FF7DE457283915C45517D722EDB8B08F1DFC3  # 素数域
+a = 0x787968B4FA32C3FD2417842E73BBFEFF2F3C848B6831D7E0EC65228B3937E498      # 曲线参数a
+b = 0x63E4C6D3B23B0C849CF84241484BFE48F61D59A5B16BA06E6E12D1DA27C5249A      # 曲线参数b
+n = 0x8542D69E4C044F18E8B92435BF6FF7DD297720630485628D5AE74EE7C32E79B7      # 曲线阶数
+Gx = 0x421DEBD61B62EAB6746434EBC3CC315E32220B3BADD50BDC4C4E6C147FEDD43D  # 基点x坐标
+Gy = 0x0680512BCBB42C07D47349D2153B70C4E5D7FDFCBFA36EA1A85841B9E46E09A2  # 基点y坐标
+G = (Gx, Gy)  # 椭圆曲线基点
 ```
+曲线方程：$y^2 \equiv x^3 + ax + b \mod p$
 
 
-## 二、SM3实现优化
+### 1.2 核心数学运算实现
 
-### 1. 优化目标
-提升SM3哈希计算效率，尤其是处理大规模数据时的性能，同时保持算法正确性。
-
-### 2. 优化策略
-
-#### （1）预计算常量
-预计算`T_j`的循环左移结果，避免每次迭代重复计算：
+#### 1.2.1 模逆运算
+基于费马小定理（$a^{p-2} \equiv a^{-1} \mod p$，适用于素数域）：
 ```python
-# 预计算RotL(T_j, j)
-ROTATED_T = []
-for j in range(64):
-    T = 0x79CC4519 if j < 16 else 0x7A879D8A
-    ROTATED_T.append(rotate_left(T, j))
+def mod_inverse(a, p):
+    return pow(a, p - 2, p)
 ```
 
-#### （2）减少内存操作
-将消息扩展和压缩函数的数组操作改为局部变量，减少内存访问开销：
+#### 1.2.2 椭圆曲线点加法
+已知曲线上两点$P=(x_1,y_1)$和$Q=(x_2,y_2)$，计算$P+Q=(x_3,y_3)$：
 ```python
-# 压缩函数中使用局部变量而非列表索引
-A, B, C, D, E, F, G, H = V
-for j in range(64):
-    # 直接使用变量计算，减少列表访问
-    ...
+def point_add(p1, p2):
+    if p1 is None:
+        return p2
+    if p2 is None:
+        return p1
+    x1, y1 = p1
+    x2, y2 = p2
+    
+    # 处理特殊情况（无穷远点）
+    if x1 == x2 and y1 != y2:
+        return None  # P + (-P) = 无穷远点
+    
+    # 计算斜率λ
+    if x1 != x2:
+        lam = ((y2 - y1) * mod_inverse((x2 - x1) % p, p)) % p
+    else:
+        # 同点加倍（P=Q时）
+        lam = ((3 * x1**2 + a) * mod_inverse((2 * y1) % p, p)) % p
+    
+    # 计算相加结果
+    x3 = (lam**2 - x1 - x2) % p
+    y3 = (lam * (x1 - x3) - y1) % p
+    return (x3, y3)
 ```
+**数学原理**：
+- 不同点：$\lambda = (y_2 - y_1)/(x_2 - x_1)$，$x_3 = \lambda^2 - x_1 - x_2$，$y_3 = \lambda(x_1 - x_3) - y_1$
+- 同点加倍：$\lambda = (3x_1^2 + a)/(2y_1)$，$x_3, y_3$计算同上
 
-#### （3）循环展开
-对64轮迭代进行部分展开（如按16轮分组），减少循环控制开销。
 
-#### （4）类型优化
-使用`uint32`类型强制转换确保运算在32位内进行，避免Python整数自动扩展带来的性能损耗：
+#### 1.2.3 椭圆曲线点乘法
+通过倍点加法实现$kP$（$k$为标量，$P$为曲线点）：
 ```python
-def rotate_left(x, n):
-    return ((x << n) & 0xFFFFFFFF) | ((x >> (32 - n)) & 0xFFFFFFFF)
+def point_mul(k, p):
+    result = None
+    current = p
+    while k > 0:
+        if k % 2 == 1:
+            result = point_add(result, current)
+        current = point_add(current, current)  # 倍点运算
+        k = k // 2
+    return result
 ```
 
-### 3. 优化效果
-- 小规模数据（1KB）：吞吐量提升约30%
-- 大规模数据（1MB）：吞吐量提升约40%，主要得益于预计算和内存优化
 
-
-## 三、SM3长度扩展攻击（Length-Extension Attack）
-
-### 1. 攻击原理
-SM3基于Merkle-Damgård结构，其哈希值本质是"消息+填充"处理后的压缩函数状态。攻击者可利用已知哈希值和消息长度，在未知原始消息的情况下，计算"原始消息+填充+附加数据"的哈希值。
-
-核心条件：
-- 已知原始消息哈希`H(M)`和长度`len(M)`
-- 目标：计算`H(M || pad(M) || X)`（`X`为附加数据，`pad(M)`为`M`的填充）
-
-### 2. 攻击步骤与数学描述
-
-#### （1）状态转换
-原始哈希`H(M)`对应压缩函数处理`M || pad(M)`后的状态`V_n`：
-```
-V_n = Compress(IV, M_1) → Compress(V_1, M_2) → ... → Compress(V_{n-1}, M_n)
-H(M) = V_n
-```
-攻击者将`H(M)`作为初始状态，处理附加数据`X`的块。
-
-#### （2）填充计算
-计算`M`的填充`pad(M)`：
-```
-pad(M) = fill_message(M)[len(M):]  # 仅取填充部分
-```
-
-#### （3）扩展消息处理
-构造扩展消息`M' = pad(M) || X`，计算其填充`pad(M')`，使得总长度满足512比特倍数：
-```
-总长度 = len(M) + len(pad(M)) + len(X) + len(pad(M')) = 512 × k
-```
-
-#### （4）哈希计算
-以`H(M)`为初始状态，处理`M' || pad(M')`的块：
-```
-H(M || pad(M) || X) = Compress(V_n, M'_1) → ... → Compress(V'_{m-1}, M'_m)
-```
-
-### 3. 攻击实现代码核心
+### 1.3 密钥生成
+- **私钥**：随机整数$d \in [1, n-2]$
+- **公钥**：$Q = d \cdot G$（通过点乘法计算）
 ```python
-def length_extension_attack(original_hash, original_len, append_data):
-    # 1. 原始哈希转换为初始状态
-    current_state = hash_to_state(original_hash)
-    # 2. 计算原始消息填充
-    padding = compute_padding(original_len)
-    # 3. 构造扩展数据
-    extended_data = padding + append_data
-    # 4. 计算扩展数据填充
-    total_length = original_len + len(extended_data)
-    extension_padding = compute_padding(total_length)[len(extended_data):]
-    # 5. 处理扩展数据块
-    full_data = extended_data + extension_padding
-    for i in range(0, len(full_data), 64):
-        block = full_data[i:i+64]
-        current_state = compression_function(current_state, block)
-    return state_to_hash(current_state)
+def key_generation():
+    d = secrets.randbelow(n-1) + 1  # 确保1 ≤ d ≤ n-1
+    Q = point_mul(d, G)
+    return d, Q
 ```
 
-### 4. 攻击验证
-通过对比"原始消息+填充+附加数据"的正常哈希与攻击计算结果，验证攻击有效性：
+
+### 1.4 签名与验签实现
+
+#### 1.4.1 签名算法
+对消息$M$生成签名$(r, s)$：
+1. 计算用户信息哈希$Z_A$：
+   $$Z_A = \text{SM3}(entl || ID || a || b || Gx || Gy || x_A || y_A)$$
+   （$entl$为ID长度，$x_A,y_A$为公钥$Q$坐标）
+
+2. 计算消息哈希$e$：
+   $$e = \text{SM3}(Z_A || M)$$
+
+3. 生成随机数$k \in [1, n-1]$，计算$kG = (x_1, y_1)$
+
+4. 计算签名组件：
+   $$r = (e_{\text{int}} + x_1) \mod n$$
+   $$s = [(1 + d)^{-1} \cdot (k - r \cdot d)] \mod n$$
+
 ```python
-# 正常计算（已知原始消息）
-padded_original = fill_message(secret_message)
-combined = padded_original + append_data
-expected_hash = sm3_hash(combined)
+from gmssl import sm3, func
 
-# 攻击计算（未知原始消息）
-attacked_hash = length_extension_attack(original_hash, len(secret_message), append_data)
+def compute_ZA(Q, user_id=b"1234567812345678"):
+    entl = len(user_id) * 8
+    entl_bytes = entl.to_bytes(2, byteorder='big')
+    xA, yA = Q
+    a_bytes = int_to_bytes(a)
+    b_bytes = int_to_bytes(b)
+    Gx_bytes = int_to_bytes(Gx)
+    Gy_bytes = int_to_bytes(Gy)
+    xA_bytes = int_to_bytes(xA)
+    yA_bytes = int_to_bytes(yA)
+    za_input = entl_bytes + user_id + a_bytes + b_bytes + Gx_bytes + Gy_bytes + xA_bytes + yA_bytes
+    return sm3.sm3_hash(func.bytes_to_list(za_input))
 
-assert attacked_hash == expected_hash  # 攻击成功
+def sm2_sign(M, d, Q, user_id=b"1234567812345678"):
+    ZA = compute_ZA(Q, user_id)
+    M_bytes = M.encode('utf-8')
+    e_input = bytes.fromhex(ZA) + M_bytes
+    e = sm3.sm3_hash(func.bytes_to_list(e_input))
+    e_int = bytes_to_int(bytes.fromhex(e))
+    
+    while True:
+        k = secrets.randbelow(n-1) + 1
+        kG = point_mul(k, G)
+        if kG is None:
+            continue
+        x1 = kG[0]
+        r = (e_int + x1) % n
+        if r != 0 and (r + k) % n != 0:
+            break
+    
+    s = (mod_inverse((1 + d) % n, n) * (k - r * d)) % n
+    s = (s + n) % n  # 确保s为正数
+    return (r, s)
 ```
 
 
-## 四、基于RFC6962的Merkle树实现
+#### 1.4.2 验签算法
+验证签名$(r, s)$有效性：
+1. 检查$r, s \in [1, n-1]$
+2. 计算$Z_A$和$e$（同签名步骤）
+3. 计算$t = (r + s) \mod n$，若$t=0$则无效
+4. 计算$(x_1, y_1) = sG + tQ$
+5. 验证$r \equiv (e_{\text{int}} + x_1) \mod n$
 
-### 1. RFC6962标准核心规范
-RFC6962定义了用于证书透明性的Merkle树结构，核心要求：
-- 叶子节点哈希：`LeafHash(data) = SM3(0x00 || data)`（0x00为叶子前缀）
-- 内部节点哈希：`InternalHash(left, right) = SM3(0x01 || left_bytes || right_bytes)`（0x01为内部节点前缀）
-- 支持存在性证明和不存在性证明
-
-### 2. Merkle树构建
-
-#### （1）树结构定义
-- 叶子层：`L = [LeafHash(data_0), LeafHash(data_1), ..., LeafHash(data_{n-1})]`
-- 内部层：第`k`层节点由第`k-1`层节点两两合并生成，若节点数为奇数，最后一个节点自合并
-- 根节点：顶层唯一节点`Root = H_k(...)`，其中`k`为树深度
-
-数学描述：
-设第`k`层节点集为`N_k`，则：
-```
-N_0 = L
-N_k[i] = InternalHash(N_{k-1}[2i], N_{k-1}[2i+1]) （2i+1 < |N_{k-1}|）
-N_k[i] = InternalHash(N_{k-1}[2i], N_{k-1}[2i]) （2i+1 ≥ |N_{k-1}|）
-Root = N_d[0] （d为树深度，满足2^{d-1} < n ≤ 2^d）
-```
-
-#### （2）构建代码核心
 ```python
-def _build_tree(self):
-    # 叶子层哈希
-    leaf_hashes = [self._hash_leaf(leaf) for leaf in self.leaves]
-    self.tree.append(leaf_hashes)
-    # 逐层计算内部节点
-    current_level = leaf_hashes
-    while len(current_level) > 1:
-        next_level = []
-        for i in range(0, len(current_level), 2):
-            left = current_level[i]
-            right = current_level[i+1] if i+1 < len(current_level) else left
-            next_level.append(self._hash_internal(left, right))
-        current_level = next_level
-        self.tree.append(current_level)
+def sm2_verify(M, signature, Q, user_id=b"1234567812345678"):
+    r, s = signature
+    if r < 1 or r >= n or s < 1 or s >= n:
+        return False
+    
+    ZA = compute_ZA(Q, user_id)
+    M_bytes = M.encode('utf-8')
+    e_input = bytes.fromhex(ZA) + M_bytes
+    e = sm3.sm3_hash(func.bytes_to_list(e_input))
+    e_int = bytes_to_int(bytes.fromhex(e))
+    
+    t = (r + s) % n
+    if t == 0:
+        return False
+    
+    sG = point_mul(s, G)
+    tQ = point_mul(t, Q)
+    x1y1 = point_add(sG, tQ)
+    if x1y1 is None:
+        return False
+    x1, _ = x1y1
+    
+    R = (e_int + x1) % n
+    return R == r
 ```
 
-### 3. 存在性证明（Inclusion Proof）
 
-#### （1）证明原理
-证明某叶子节点`data_i`在树中，需提供从`LeafHash(data_i)`到根节点的路径上所有兄弟节点的哈希及位置（左/右孩子）。
+## 二、PoC验证：随机数漏洞导致私钥泄露
 
-#### （2）证明生成
+### 2.1 漏洞原理
+SM2签名安全性依赖随机数$k$的**保密性**和**唯一性**。若重复使用$k$，攻击者可通过两组签名推导私钥$d$。
+
+#### 数学推导：
+设两次签名使用同一$k$，得到$(r_1, s_1)$和$(r_2, s_2)$：
+$$
+\begin{cases}
+s_1 \cdot (1 + d) \equiv k - r_1 \cdot d \mod n \quad (1) \\
+s_2 \cdot (1 + d) \equiv k - r_2 \cdot d \mod n \quad (2)
+\end{cases}
+$$
+两式相减消去$k$：
+$$(s_1 - s_2)(1 + d) \equiv (r_2 - r_1)d \mod n$$
+整理得私钥$d$的推导公式：
+$$d \equiv \frac{s_2 - s_1}{s_1 - s_2 + r_1 - r_2} \mod n \tag{3}$$
+
+
+### 2.2 实验验证
+
+#### 步骤1：生成密钥对与重复$k$的签名
 ```python
-def get_inclusion_proof(self, index):
-    proof = []
-    current_idx = index
-    for level in range(len(self.tree) - 1):
-        is_left = current_idx % 2 == 0
-        sibling_idx = current_idx + 1 if is_left else current_idx - 1
-        # 处理奇数节点边界
-        if sibling_idx >= len(self.tree[level]):
-            sibling_idx = current_idx
-        proof.append((self.tree[level][sibling_idx], is_left))
-        current_idx = current_idx // 2  # 上一层节点索引
-    return proof
+# 生成虚构用户密钥对
+d, Q = key_generation()
+print(f"私钥d: 0x{d:064x}")
+
+# 重复使用随机数k对两个消息签名
+k = secrets.randbelow(n-1) + 1  # 固定k
+msg1 = "测试消息1"
+msg2 = "测试消息2"
+sig1 = sm2_sign_with_k(msg1, d, Q, k)  # 用固定k签名
+sig2 = sm2_sign_with_k(msg2, d, Q, k)
+r1, s1 = sig1
+r2, s2 = sig2
 ```
 
-#### （3）证明验证
+#### 步骤2：通过公式(3)推导私钥
 ```python
-def verify_inclusion(leaf_data, proof, root, index, total_leaves):
-    current_hash = _hash_leaf(leaf_data)
-    for sibling_hash, is_left in proof:
-        if is_left:
-            current_hash = _hash_internal(current_hash, sibling_hash)
-        else:
-            current_hash = _hash_internal(sibling_hash, current_hash)
-    return current_hash == root
+def deduce_private_key(r1, s1, r2, s2):
+    numerator = (s2 - s1) % n
+    denominator = (s1 - s2 + r1 - r2) % n
+    inv_denominator = mod_inverse(denominator, n)
+    d_deduced = (numerator * inv_denominator) % n
+    return d_deduced
+
+d_deduced = deduce_private_key(r1, s1, r2, s2)
+print(f"推导私钥: 0x{d_deduced:064x}")
+print(f"验证结果: {d_deduced == d}")  # 应输出True
 ```
 
-### 4. 不存在性证明（Exclusion Proof）
+#### 实验结果：
+```
+私钥d: 0x7c4cd5c35f28528e0d2b6a66dde4246bfdf6d240512983aa1e2a5399a0d315b1
+推导私钥: 0x7c4cd5c35f28528e0d2b6a66dde4246bfdf6d240512983aa1e2a5399a0d315b1
+验证结果: True
+```
 
-#### （1）证明原理
-证明目标数据`X`不在树中，需：
-- 找到`X`的理论插入位置`p`（满足`LeafHash(leaves[p-1]) < LeafHash(X) < LeafHash(leaves[p])`）
-- 证明`leaves[p-1]`和`leaves[p]`是相邻节点（`p - (p-1) = 1`）
 
-#### （2）证明生成与验证
+## 三、虚构场景签名伪造
+
+### 伪造步骤
+
+#### 步骤1：获取私钥
+通过PoC验证中的方法，攻击者已推导得到私钥$d$。
+
+#### 步骤2：生成伪造签名
+使用泄露的私钥对任意消息生成签名：
 ```python
-def get_exclusion_proof(self, target_data):
-    target_hash = self._hash_leaf(target_data)
-    # 查找插入位置p
-    insert_pos = 0
-    while insert_pos < self.leaf_count and self.tree[0][insert_pos] < target_hash:
-        insert_pos += 1
-    # 获取左右邻居证明
-    left_idx = insert_pos - 1 if insert_pos > 0 else None
-    right_idx = insert_pos if insert_pos < self.leaf_count else None
-    return {
-        "left": {"index": left_idx, "proof": self.get_inclusion_proof(left_idx)},
-        "right": {"index": right_idx, "proof": self.get_inclusion_proof(right_idx)},
-        "target_hash": target_hash
-    }
+def forge_signature(M, d, Q):
+    # 与正常签名流程完全一致（因私钥已泄露）
+    return sm2_sign(M, d, Q)
 
-def verify_exclusion(proof, root, total_leaves):
-    # 验证左右邻居存在性
-    left_valid = verify_inclusion(...)
-    right_valid = verify_inclusion(...)
-    # 验证哈希顺序和相邻性
-    order_valid = (left_hash < target_hash < right_hash)
-    adjacent_valid = (right_idx - left_idx == 1)
-    return left_valid and right_valid and order_valid and adjacent_valid
+# 伪造消息与签名
+fake_msg = "虚构场景：伪造的消息"
+fake_sig = forge_signature(fake_msg, d_deduced, Q)
+print(f"伪造签名: (r=0x{fake_sig[0]:064x}, s=0x{fake_sig[1]:064x})")
+```
+
+#### 步骤3：验证伪造签名
+```python
+verify_result = sm2_verify(fake_msg, fake_sig, Q)
+print(f"伪造签名验证结果: {verify_result}")  # 输出True（因私钥正确）
+```
+
+#### 输出结果：
+```
+伪造签名: (r=0x72abd72df13a4e9f75a10a79c1dcbc017ea34325a6259924141fc97bc2492065, s=0x1d97801a4b23dd2f3295f88de08d2be0843f3237125abc974d3a7c38df804cff)
+伪造签名验证结果: True
 ```
 
 
-## 项目总结
+## 四、安全启示与防御措施
 
-本项目完整实现了SM3哈希算法的全流程应用，从基础原理到高级攻击与数据结构：
-1. **基础实现**：严格遵循SM3算法规范，实现消息填充、扩展与压缩函数
-2. **性能优化**：通过预计算、内存优化等手段提升哈希计算效率
-3. **长度扩展攻击**：利用Merkle-Damgård结构特性，实现对SM3的长度扩展攻击
-4. **Merkle树应用**：基于RFC6962标准构建高效Merkle树，支持大规模数据的存在性与不存在性证明
+1. **随机数管理**：
+   - 必须使用`secrets`模块生成加密安全的随机数，禁止重复使用$k$
+   - 推荐实现RFC6979标准，基于消息和私钥生成确定性随机数（避免重复）
+
+2. **实现加固**：
+   - 采用抗侧信道攻击的点乘法（如蒙哥马利梯子法），防止$k$通过功耗/时间差异泄露
+   - 验签时严格检查$r, s$的范围（$1 \leq r, s < n$）
+
+
+## 附录：辅助函数
+```python
+def int_to_bytes(i):
+    return i.to_bytes(32, byteorder='big')
+
+def bytes_to_int(b):
+    return int.from_bytes(b, byteorder='big')
+
+def sm2_sign_with_k(M, d, Q, k):
+    # 固定k的签名函数（仅用于PoC验证）
+    ZA = compute_ZA(Q)
+    M_bytes = M.encode('utf-8')
+    e_input = bytes.fromhex(ZA) + M_bytes
+    e = sm3.sm3_hash(func.bytes_to_list(e_input))
+    e_int = bytes_to_int(bytes.fromhex(e))
+    
+    kG = point_mul(k, G)
+    x1 = kG[0]
+    r = (e_int + x1) % n
+    while r == 0 or (r + k) % n == 0:
+        k = secrets.randbelow(n-1) + 1
+        kG = point_mul(k, G)
+        x1 = kG[0]
+        r = (e_int + x1) % n
+    
+    s = (mod_inverse((1 + d) % n, n) * (k - r * d)) % n
+    s = (s + n) % n
+    return (r, s)
+```
