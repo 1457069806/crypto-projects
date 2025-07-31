@@ -7,19 +7,6 @@ import os
 current_path = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(current_path, "../../../"))
 
-# 检查 project_root 是否存在，且包含 project_1_sm4 目录
-if os.path.exists(project_root) and os.path.exists(os.path.join(project_root, "project_1_sm4")):
-    print(f"项目根目录有效: {project_root}")
-    sys.path.append(project_root)
-else:
-    # 路径无效时，抛出异常或手动修正
-    raise FileNotFoundError(
-        f"项目根目录拼接错误！\n"
-        f"当前拼接路径: {project_root}\n"
-        f"预期应包含 project_1_sm4 目录，请检查 os.path.join 的层级（调整 ../ 的数量）。"
-    )
-
-# 继续导入...
 from project_1_sm4.src.core.sm4 import SM4
 import timeit
 import itertools
